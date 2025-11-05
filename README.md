@@ -33,9 +33,9 @@
 #### 方法 A: 使用 conda (推荐)
 
 ```bash
-# 创建环境
-conda create -n kan python=3.8 -y
-conda activate kan
+# 创建环境（如果还没创建）
+conda create -n kyyc_py311 python=3.11 -y
+conda activate kyyc_py311
 
 # 安装 PyTorch (GPU版 - CUDA 13.0)
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
@@ -44,12 +44,20 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install streamlit pandas scipy numpy matplotlib
 ```
 
-#### 方法 B: 使用 requirements.txt
+#### 方法 B: 一键安装（Windows）
+
+双击运行 `安装依赖.bat`，自动安装所有依赖（需要先创建conda环境）
+
+#### 方法 C: 使用 requirements.txt
 
 ```bash
 pip install -r requirements.txt
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 ```
+
+> **重要提示**：
+> - 推荐环境名称：`kyyc_py311`
+> - PyTorch下载约2-3GB，首次安装需要5-10分钟。请耐心等待。
 
 ### 2. 数据预处理（首次使用）
 
@@ -86,7 +94,7 @@ streamlit run STGCN.py
 #### Linux/Mac
 
 ```bash
-conda activate kan
+conda activate kyyc_py311
 streamlit run STGCN.py
 ```
 
