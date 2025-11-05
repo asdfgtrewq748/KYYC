@@ -9,6 +9,7 @@ import math
 import time
 import warnings
 from scipy.spatial.distance import pdist, squareform
+import matplotlib.pyplot as plt
 
 # 忽略 CUDA 兼容性警告
 warnings.filterwarnings('ignore', category=UserWarning, message='.*CUDA capability.*')
@@ -52,6 +53,24 @@ def load_csv_data(csv_file, time_col=None):
     data = np.expand_dims(data, axis=-1)  # (num_samples, num_nodes, 1)
     
     return data, column_names
+
+def load_processed_sequence_data(npz_file):
+    """
+    加载预处理好的序列数据集
+    :param npz_file: .npz 文件路径或文件对象
+    :return: X, y_final, support_ids, feature_names
+    """
+    if isinstance(npz_file, str):
+        data = np.load(npz_file, allow_pickle=True)
+    else:
+        data = np.load(npz_file, allow_pickle=True)
+    
+    X = data['X']  # (num_samples, seq_len, num_features)
+    y_final = data['y_final']  # (num_samples, pred_len)
+    support_ids = data['support_ids']  # (num_samples,)
+    feature_names = data['feature_names'].tolist() if 'feature_names' in data else []
+    
+    return X, y_final, support_ids, feature_names
 
 def load_coordinate_file(coord_file):
     """
@@ -143,43 +162,59 @@ def align_data_with_coordinates(column_names, coord_df):
     
     return coords_array, alignment_info
 
-def load_geological_features(geo_file, coords_array):
+def load_geological_features(geo_file, coords_array, column_names=None):
     """
     加载地质特征数据并映射到支架位置
-    :param geo_file: 地质特征文件 (CSV 或 Excel)
+    :param geo_file: 地质特征文件 (CSV, Excel, 或路径字符串)
     :param coords_array: 支架坐标数组 (num_nodes, 2 或 3)
-    :return: 地质特征矩阵 (num_nodes, num_geo_features)
+    :param column_names: 支架名称列表(可选,用于直接匹配钻孔名称)
+    :return: 地质特征矩阵 (num_nodes, num_geo_features), 特征列名
     """
-    if geo_file.name.endswith('.csv'):
-        geo_df = pd.read_csv(geo_file)
-    elif geo_file.name.endswith(('.xls', '.xlsx')):
-        geo_df = pd.read_excel(geo_file)
+    # 支持文件对象或路径字符串
+    if isinstance(geo_file, str):
+        if geo_file.endswith('.csv'):
+            geo_df = pd.read_csv(geo_file, encoding='utf-8-sig')
+        elif geo_file.endswith(('.xls', '.xlsx')):
+            geo_df = pd.read_excel(geo_file)
+        else:
+            raise ValueError("地质文件格式不支持")
     else:
-        raise ValueError("地质文件格式不支持")
-    
-    # 假设地质文件包含: X, Y, 特征1, 特征2, ...
-    # 需要根据距离插值到支架位置
+        if geo_file.name.endswith('.csv'):
+            geo_df = pd.read_csv(geo_file, encoding='utf-8-sig')
+        elif geo_file.name.endswith(('.xls', '.xlsx')):
+            geo_df = pd.read_excel(geo_file)
+        else:
+            raise ValueError("地质文件格式不支持")
     
     from scipy.spatial import KDTree
     
     # 提取地质点坐标
-    x_col = next((col for col in ['X', 'x', 'X坐标'] if col in geo_df.columns), None)
-    y_col = next((col for col in ['Y', 'y', 'Y坐标'] if col in geo_df.columns), None)
+    x_col = next((col for col in ['x', 'X', 'X坐标', '坐标x'] if col in geo_df.columns), None)
+    y_col = next((col for col in ['y', 'Y', 'Y坐标', '坐标y'] if col in geo_df.columns), None)
     
     if x_col is None or y_col is None:
         raise ValueError("地质文件必须包含 X 和 Y 坐标列")
     
     geo_coords = geo_df[[x_col, y_col]].values
     
-    # 提取地质特征列(排除坐标列)
-    feature_cols = [col for col in geo_df.columns if col not in [x_col, y_col]]
+    # 提取地质特征列(排除坐标、钻孔名等ID列)
+    exclude_cols = [x_col, y_col, 'borehole', '钻孔名', 'id', 'ID', 'name']
+    feature_cols = [col for col in geo_df.columns if col not in exclude_cols]
+    
+    # 如果没有数值特征,返回空数组
+    if len(feature_cols) == 0:
+        return np.zeros((len(coords_array), 1)), ['dummy_feature']
+    
     geo_features = geo_df[feature_cols].values
     
-    # 使用 KNN 插值
+    # 填充缺失值
+    geo_features = np.nan_to_num(geo_features, nan=0.0)
+    
+    # 使用 KNN 插值映射到支架位置
     tree = KDTree(geo_coords)
     distances, indices = tree.query(coords_array[:, :2], k=1)
     
-    # 为每个支架分配最近的地质特征
+    # 为每个支架分配最近钻孔的地质特征
     support_geo_features = geo_features[indices.flatten()]
     
     return support_geo_features, feature_cols
@@ -542,66 +577,145 @@ else:
 
 st.sidebar.header("数据上传")
 
-# 步骤1: 上传矿压数据
-st.sidebar.subheader("步骤1: 矿压数据")
-data_file = st.sidebar.file_uploader("上传矿压数据文件 (.csv)", type=["csv"])
-st.sidebar.info(
-    """
-    **CSV 格式要求:**
-    - 每行 = 一个时间点
-    - 每列 = 一个支架(列名要与坐标文件对应)
-    
-    示例:
-    ```
-    时间, ZJ001, ZJ002, ZJ003, ...
-    2023-01-01, 100.5, 98.3, 102.1, ...
-    ```
-    """
+# 数据源选择
+data_source = st.sidebar.radio(
+    "选择数据来源",
+    ["上传CSV文件", "使用预处理数据集"],
+    help="CSV: 原始矿压时间序列 | 预处理: 已提取特征的训练数据"
 )
 
-# 步骤2: 上传支架坐标
-st.sidebar.subheader("步骤2: 支架坐标 (重要!)")
-coord_file = st.sidebar.file_uploader(
-    "上传支架坐标文件 (.csv/.xlsx)", 
-    type=["csv", "xlsx", "xls"],
-    help="坐标文件应包含: 支架ID, X坐标, Y坐标"
-)
-st.sidebar.info(
-    """
-    **坐标文件格式:**
-    ```
-    支架ID, X坐标, Y坐标
-    ZJ001, 1000.5, 2000.3
-    ZJ002, 1001.2, 2000.5
-    ZJ003, 1002.0, 2001.1
-    ```
+# 根据数据源显示不同的上传选项
+if data_source == "使用预处理数据集":
+    st.sidebar.subheader("📦 加载预处理数据")
     
-    ⚠️ **支架ID必须与矿压数据的列名对应**
-    """
-)
+    # 检查默认数据集
+    default_npz_path = os.path.join(os.path.dirname(__file__), 'processed_data', 'sequence_dataset.npz')
+    use_default_dataset = False
+    
+    if os.path.exists(default_npz_path):
+        use_default_dataset = st.sidebar.checkbox(
+            "使用已生成的数据集",
+            value=True,
+            help=f"路径: {default_npz_path}"
+        )
+    
+    if use_default_dataset:
+        npz_file = default_npz_path
+        st.sidebar.success("✓ 使用预处理数据集")
+        st.sidebar.info(
+            """
+            **数据集信息:**
+            - 195,836 个训练样本
+            - 125 个支架
+            - 17 维特征
+            - 序列长度: 5 → 1
+            """
+        )
+    else:
+        npz_file = st.sidebar.file_uploader(
+            "上传预处理数据文件 (.npz)",
+            type=["npz"],
+            help="使用 preprocess/prepare_training_data.py 生成的数据"
+        )
+    
+    # 加载坐标文件
+    coord_file_path = os.path.join(os.path.dirname(__file__), 'processed_data', 'support_coordinates.csv')
+    if os.path.exists(coord_file_path):
+        coord_file = coord_file_path
+    else:
+        coord_file = None
+    
+else:  # CSV 文件上传模式
+    npz_file = None
+    
+    # 步骤1: 上传矿压数据
+    st.sidebar.subheader("步骤1: 矿压数据")
+    data_file = st.sidebar.file_uploader("上传矿压数据文件 (.csv)", type=["csv"])
+    st.sidebar.info(
+        """
+        **CSV 格式要求:**
+        - 每行 = 一个时间点
+        - 每列 = 一个支架(列名要与坐标文件对应)
+        
+        示例:
+        ```
+        时间, ZJ001, ZJ002, ZJ003, ...
+        2023-01-01, 100.5, 98.3, 102.1, ...
+        ```
+        """
+    )
 
-# 步骤3: 上传地质特征(可选)
-st.sidebar.subheader("步骤3: 地质特征 (可选)")
-use_geological = st.sidebar.checkbox("融合地质特征数据", value=False)
-geo_file = None
-if use_geological:
-    geo_file = st.sidebar.file_uploader(
-        "上传地质特征文件 (.csv/.xlsx)",
+    # 步骤2: 上传支架坐标
+    st.sidebar.subheader("步骤2: 支架坐标 (重要!)")
+    coord_file = st.sidebar.file_uploader(
+        "上传支架坐标文件 (.csv/.xlsx)", 
         type=["csv", "xlsx", "xls"],
-        help="地质文件应包含: X坐标, Y坐标, 地质特征"
+        help="坐标文件应包含: 支架ID, X坐标, Y坐标"
     )
     st.sidebar.info(
         """
-        **地质文件格式:**
+        **坐标文件格式:**
         ```
-        X坐标, Y坐标, 断层距离, 煤层厚度, ...
-        1000.5, 2000.3, 50.2, 3.5, ...
-        1001.0, 2000.5, 48.5, 3.6, ...
+        支架ID, X坐标, Y坐标
+        ZJ001, 1000.5, 2000.3
+        ZJ002, 1001.2, 2000.5
+        ZJ003, 1002.0, 2001.1
         ```
         
-        系统会根据距离将地质特征映射到支架位置
+        ⚠️ **支架ID必须与矿压数据的列名对应**
         """
     )
+
+# 步骤3: 上传地质特征(可选) - 只在CSV模式下显示
+if data_source == "上传CSV文件":
+    st.sidebar.subheader("步骤3: 地质特征 (可选)")
+    use_geological = st.sidebar.checkbox("融合地质特征数据", value=False)
+    geo_file = None
+if use_geological:
+    # 检查是否存在默认地质特征文件
+    default_geo_path = os.path.join(os.path.dirname(__file__), 'geology_features_extracted.csv')
+    use_default_geo = False
+    
+    if os.path.exists(default_geo_path):
+        use_default_geo = st.sidebar.checkbox(
+            "使用提取的钻孔地质特征", 
+            value=True,
+            help=f"已检测到 geology_features_extracted.csv"
+        )
+    
+    if use_default_geo:
+        geo_file = default_geo_path
+        st.sidebar.success("✓ 使用钻孔地质特征数据")
+        st.sidebar.info(
+            """
+            **包含的地质特征:**
+            - 总厚度 (m)
+            - 煤层厚度/数量 (m/个)
+            - 顶板煤层埋深 (m)
+            - 平均弹性模量 (GPa)
+            - 平均容重 (kN/m³)
+            - 最大抗拉强度 (MPa)
+            - 砂岩/泥岩占比
+            """
+        )
+    else:
+        geo_file = st.sidebar.file_uploader(
+            "上传地质特征文件 (.csv/.xlsx)",
+            type=["csv", "xlsx", "xls"],
+            help="地质文件应包含: X坐标, Y坐标, 地质特征"
+        )
+        st.sidebar.info(
+            """
+            **地质文件格式:**
+            ```
+            X坐标, Y坐标, 断层距离, 煤层厚度, ...
+            1000.5, 2000.3, 50.2, 3.5, ...
+            1001.0, 2000.5, 48.5, 3.6, ...
+            ```
+            
+            系统会根据距离将地质特征映射到支架位置
+            """
+        )
 
 # 邻接矩阵生成方式
 st.sidebar.header("邻接矩阵设置")
@@ -631,7 +745,394 @@ if adj_method == "upload":
     adj_file = st.sidebar.file_uploader("上传邻接矩阵文件 (.npy或.csv)", type=["npy", "csv"])
 
 # --- 主界面 ---
-if data_file:
+if data_source == "使用预处理数据集" and npz_file:
+    st.header("1. 加载预处理数据集")
+    
+    try:
+        # 加载预处理的序列数据
+        X, y_final, support_ids, feature_names = load_processed_sequence_data(npz_file)
+        
+        st.write(f"**数据形状:**")
+        st.write(f"- 样本数量: {X.shape[0]:,}")
+        st.write(f"- 序列长度: {X.shape[1]} (历史步数)")
+        st.write(f"- 特征维度: {X.shape[2]}")
+        st.write(f"- 标签形状: {y_final.shape}")
+        
+        NUM_SAMPLES = X.shape[0]
+        SEQ_LEN = X.shape[1]
+        NUM_FEATURES = X.shape[2]
+        PRED_LEN = y_final.shape[1]
+        
+        # 获取支架信息
+        unique_supports = np.unique(support_ids)
+        NUM_NODES = len(unique_supports)
+        
+        st.success(f"✅ 成功加载数据集！包含 {NUM_NODES} 个支架，{NUM_SAMPLES:,} 个训练样本")
+        
+        # 显示特征列表
+        with st.expander("📋 查看特征列表"):
+            st.write(f"共 {len(feature_names)} 个特征:")
+            for i, fname in enumerate(feature_names, 1):
+                st.write(f"{i}. {fname}")
+        
+        # 加载坐标
+        coords_array = None
+        if coord_file:
+            if isinstance(coord_file, str):
+                coord_df = pd.read_csv(coord_file)
+            else:
+                coord_df = load_coordinate_file(coord_file)
+            
+            coords_array = coord_df[['x', 'y']].values
+            st.write(f"**支架坐标:** {coords_array.shape}")
+        else:
+            # 使用默认线性坐标
+            coords_array = np.column_stack([np.arange(NUM_NODES), np.zeros(NUM_NODES)])
+            st.info("使用默认线性坐标")
+        
+        # 数据分割
+        st.header("2. 数据分割")
+        train_ratio = st.slider("训练集比例", 0.5, 0.9, 0.7, 0.05)
+        val_ratio = st.slider("验证集比例", 0.05, 0.3, 0.15, 0.05)
+        
+        train_end = int(NUM_SAMPLES * train_ratio)
+        val_end = int(NUM_SAMPLES * (train_ratio + val_ratio))
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("训练集", f"{train_end:,}", f"{train_ratio*100:.0f}%")
+        with col2:
+            st.metric("验证集", f"{val_end-train_end:,}", f"{val_ratio*100:.0f}%")
+        with col3:
+            st.metric("测试集", f"{NUM_SAMPLES-val_end:,}", f"{(1-train_ratio-val_ratio)*100:.0f}%")
+        
+        # 转换为图数据格式
+        # 由于预处理数据已经是 (num_samples, seq_len, num_features)
+        # 我们需要重塑为 (num_samples_per_support, num_supports, seq_len, num_features)
+        
+        st.header("3. 图结构构建")
+        
+        # 生成邻接矩阵
+        adj_method = st.selectbox(
+            "邻接矩阵生成方式",
+            ["distance", "knn", "chain", "full"],
+            help="distance: 基于坐标距离 | knn: K近邻 | chain: 链式 | full: 全连接"
+        )
+        
+        adj_params = {}
+        if adj_method == "knn":
+            adj_params['k'] = st.number_input("K值(近邻数量)", min_value=1, value=5, max_value=20)
+        elif adj_method == "distance":
+            adj_params['threshold'] = st.number_input("距离阈值(米)", min_value=0.1, value=5.0, step=0.5)
+        
+        adj_mx = generate_adjacency_matrix(
+            NUM_NODES,
+            method=adj_method,
+            coords=coords_array,
+            **adj_params
+        )
+        
+        # 显示图信息
+        num_edges = np.sum(adj_mx > 0)
+        avg_degree = num_edges / NUM_NODES
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("节点数", NUM_NODES)
+            st.metric("平均度数", f"{avg_degree:.1f}")
+        with col2:
+            st.metric("边数", int(num_edges))
+            st.metric("图密度", f"{num_edges/(NUM_NODES*(NUM_NODES-1))*100:.2f}%")
+        
+        # 可视化邻接矩阵
+        with st.expander("🔍 查看邻接矩阵"):
+            fig, ax = plt.subplots(figsize=(8, 8))
+            im = ax.imshow(adj_mx, cmap='Blues', aspect='auto')
+            ax.set_title("邻接矩阵")
+            ax.set_xlabel("支架 ID")
+            ax.set_ylabel("支架 ID")
+            plt.colorbar(im, ax=ax)
+            st.pyplot(fig)
+        
+        # 模型训练部分
+        st.header("4. 模型训练")
+        
+        # 训练参数
+        col1, col2 = st.columns(2)
+        with col1:
+            epochs = st.number_input("训练轮数", min_value=1, value=50, max_value=500)
+            batch_size = st.number_input("批次大小", min_value=16, value=64, max_value=512, step=16)
+        with col2:
+            learning_rate = st.number_input("学习率", min_value=0.0001, value=0.001, max_value=0.1, format="%.4f", step=0.0001)
+            hidden_dim = st.number_input("隐藏层维度", min_value=16, value=64, max_value=256, step=16)
+        
+        if st.button("🚀 开始训练", type="primary"):
+            try:
+                st.success("开始训练STGCN模型...")
+                
+                # 1. 数据切分
+                st.write("### 步骤1: 数据切分")
+                X_train = X[:train_end]
+                y_train = y_final[:train_end]
+                train_support_ids = support_ids[:train_end]
+                
+                X_val = X[train_end:val_end]
+                y_val = y_final[train_end:val_end]
+                val_support_ids = support_ids[train_end:val_end]
+                
+                X_test = X[val_end:]
+                y_test = y_final[val_end:]
+                test_support_ids = support_ids[val_end:]
+                
+                st.write(f"✓ 训练集: {len(X_train):,} 样本")
+                st.write(f"✓ 验证集: {len(X_val):,} 样本")
+                st.write(f"✓ 测试集: {len(X_test):,} 样本")
+                
+                # 获取邻接矩阵
+                A_hat = adj_mx
+                
+                # 2. 数据准备
+                st.write("### 步骤2: 准备GPU计算")
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                st.info(f"使用设备: {device}")
+                
+                # 转换数据格式 - STGCN需要 (Batch, Features, Nodes, SeqLen)
+                # 当前 X_train: (samples, seq_len, features)
+                # 需要按 support_id 重组为图结构
+                
+                # 为每个样本找到对应的support索引
+                unique_supports_list = np.unique(support_ids)
+                support_to_idx = {sup_id: idx for idx, sup_id in enumerate(unique_supports_list)}
+                num_nodes = len(unique_supports_list)
+                
+                st.write(f"图节点数: {num_nodes}")
+                
+                # 创建训练数据批次
+                def prepare_batch_data(X_data, y_data, support_data, num_nodes):
+                    """将序列数据转换为STGCN所需的图结构批次"""
+                    batch_size = len(X_data)
+                    seq_len = X_data.shape[1]
+                    num_features = X_data.shape[2]
+                    
+                    # 初始化批次张量 (Batch, Features, Nodes, SeqLen)
+                    batch_X = np.zeros((batch_size, num_features, num_nodes, seq_len))
+                    batch_y = np.zeros((batch_size, 1, num_nodes, 1))
+                    
+                    for i in range(batch_size):
+                        sup_id = support_data[i]
+                        node_idx = support_to_idx[sup_id]
+                        
+                        # X: (seq_len, features) -> (features, 1, seq_len)
+                        # 将单个支架的数据放到对应节点位置
+                        batch_X[i, :, node_idx, :] = X_data[i].T
+                        batch_y[i, 0, node_idx, 0] = y_data[i, 0]
+                    
+                    return batch_X, batch_y
+                
+                # 转换训练数据
+                st.write("### 步骤3: 转换数据格式")
+                with st.spinner("转换训练数据格式..."):
+                    train_X_graph, train_y_graph = prepare_batch_data(
+                        X_train, y_train, train_support_ids, num_nodes
+                    )
+                    val_X_graph, val_y_graph = prepare_batch_data(
+                        X_val, y_val, val_support_ids, num_nodes
+                    )
+                
+                # 转为torch张量
+                train_X_tensor = torch.FloatTensor(train_X_graph).to(device)
+                train_y_tensor = torch.FloatTensor(train_y_graph).to(device)
+                val_X_tensor = torch.FloatTensor(val_X_graph).to(device)
+                val_y_tensor = torch.FloatTensor(val_y_graph).to(device)
+                A_hat_tensor = torch.FloatTensor(A_hat).to(device)
+                
+                st.write(f"训练集: X {train_X_tensor.shape}, y {train_y_tensor.shape}")
+                st.write(f"验证集: X {val_X_tensor.shape}, y {val_y_tensor.shape}")
+                
+                # 初始化模型
+                seq_len = X_train.shape[1]
+                pred_len = 1
+                num_features = X_train.shape[2]
+                
+                model = STGCN(
+                    num_nodes=num_nodes,
+                    num_features=num_features,
+                    seq_len=seq_len,
+                    pred_len=pred_len,
+                    Kt=3
+                ).to(device)
+                
+                st.write(f"模型参数量: {sum(p.numel() for p in model.parameters()):,}")
+                
+                # 定义损失函数和优化器
+                criterion = nn.MSELoss()
+                optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+                
+                # 训练循环
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                metrics_placeholder = st.empty()
+                
+                # 存储损失历史
+                train_losses = []
+                val_losses = []
+                best_val_loss = float('inf')
+                
+                # 创建DataLoader
+                from torch.utils.data import TensorDataset, DataLoader
+                train_dataset = TensorDataset(train_X_tensor, train_y_tensor)
+                train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+                
+                start_time = time.time()
+                
+                for epoch in range(epochs):
+                    # 训练阶段
+                    model.train()
+                    epoch_train_loss = 0
+                    batch_count = 0
+                    
+                    for batch_X, batch_y in train_loader:
+                        optimizer.zero_grad()
+                        
+                        # 前向传播
+                        outputs = model(batch_X, A_hat_tensor)  # (B, 1, N, 1)
+                        
+                        # 计算损失
+                        loss = criterion(outputs, batch_y)
+                        
+                        # 反向传播
+                        loss.backward()
+                        optimizer.step()
+                        
+                        epoch_train_loss += loss.item()
+                        batch_count += 1
+                    
+                    avg_train_loss = epoch_train_loss / batch_count
+                    train_losses.append(avg_train_loss)
+                    
+                    # 验证阶段
+                    model.eval()
+                    with torch.no_grad():
+                        val_outputs = model(val_X_tensor, A_hat_tensor)
+                        val_loss = criterion(val_outputs, val_y_tensor).item()
+                        val_losses.append(val_loss)
+                        
+                        # 计算MAE和RMSE
+                        mae = torch.mean(torch.abs(val_outputs - val_y_tensor)).item()
+                        rmse = torch.sqrt(torch.mean((val_outputs - val_y_tensor)**2)).item()
+                        
+                        # 计算R²
+                        y_mean = torch.mean(val_y_tensor)
+                        ss_tot = torch.sum((val_y_tensor - y_mean)**2)
+                        ss_res = torch.sum((val_y_tensor - val_outputs)**2)
+                        r2 = 1 - ss_res / ss_tot
+                        r2 = r2.item()
+                    
+                    # 保存最佳模型
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        torch.save(model.state_dict(), 'best_stgcn_model.pth')
+                    
+                    # 更新进度
+                    progress = (epoch + 1) / epochs
+                    progress_bar.progress(progress)
+                    
+                    elapsed = time.time() - start_time
+                    eta = elapsed / (epoch + 1) * (epochs - epoch - 1)
+                    
+                    status_text.text(
+                        f"Epoch {epoch+1}/{epochs} | "
+                        f"训练损失: {avg_train_loss:.4f} | "
+                        f"验证损失: {val_loss:.4f} | "
+                        f"已用时: {elapsed:.1f}s | ETA: {eta:.1f}s"
+                    )
+                    
+                    # 每10个epoch更新一次指标
+                    if (epoch + 1) % 10 == 0 or epoch == 0:
+                        metrics_placeholder.markdown(f"""
+                        ### 当前指标
+                        - **训练损失**: {avg_train_loss:.6f}
+                        - **验证损失**: {val_loss:.6f}
+                        - **MAE**: {mae:.4f} MPa
+                        - **RMSE**: {rmse:.4f} MPa
+                        - **R²**: {r2:.4f}
+                        """)
+                
+                # 训练完成
+                st.success("✅ 训练完成！")
+                st.balloons()
+                
+                # 绘制损失曲线
+                st.subheader("📈 训练历史")
+                fig, ax = plt.subplots(figsize=(10, 5))
+                ax.plot(train_losses, label='训练损失', alpha=0.8)
+                ax.plot(val_losses, label='验证损失', alpha=0.8)
+                ax.set_xlabel('Epoch')
+                ax.set_ylabel('Loss (MSE)')
+                ax.set_title('训练过程')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                st.pyplot(fig)
+                
+                # 最终评估
+                st.subheader("🎯 最终评估结果")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("最佳验证损失", f"{best_val_loss:.6f}")
+                with col2:
+                    st.metric("MAE", f"{mae:.4f} MPa")
+                with col3:
+                    st.metric("RMSE", f"{rmse:.4f} MPa")
+                with col4:
+                    st.metric("R²", f"{r2:.4f}")
+                
+                st.info("最佳模型已保存到: best_stgcn_model.pth")
+                
+                # 预测示例
+                st.subheader("🔮 预测示例")
+                model.load_state_dict(torch.load('best_stgcn_model.pth'))
+                model.eval()
+                
+                # 随机选择几个验证样本
+                num_examples = min(5, len(val_X_tensor))
+                indices = np.random.choice(len(val_X_tensor), num_examples, replace=False)
+                
+                with torch.no_grad():
+                    example_X = val_X_tensor[indices]
+                    example_y_true = val_y_tensor[indices]
+                    example_y_pred = model(example_X, A_hat_tensor)
+                
+                # 创建对比表
+                comparison_data = []
+                for i, idx in enumerate(indices):
+                    sup_id = val_support_ids[idx]
+                    node_idx = support_to_idx[sup_id]
+                    
+                    true_val = example_y_true[i, 0, node_idx, 0].cpu().item()
+                    pred_val = example_y_pred[i, 0, node_idx, 0].cpu().item()
+                    error = abs(pred_val - true_val)
+                    
+                    comparison_data.append({
+                        '支架编号': sup_id,
+                        '真实值 (MPa)': f"{true_val:.2f}",
+                        '预测值 (MPa)': f"{pred_val:.2f}",
+                        '误差 (MPa)': f"{error:.2f}",
+                        '误差率': f"{error/true_val*100:.1f}%"
+                    })
+                
+                st.table(pd.DataFrame(comparison_data))
+                
+            except Exception as e:
+                st.error(f"训练过程出错: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+        
+    except Exception as e:
+        st.error(f"数据加载失败: {e}")
+        import traceback
+        st.code(traceback.format_exc())
+
+elif data_source == "上传CSV文件" and data_file:
     st.header("1. 数据加载与对齐")
     
     # 载入数据

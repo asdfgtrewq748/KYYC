@@ -1,0 +1,27 @@
+{
+  "num_samples": 195836,
+  "num_supports": 125,
+  "num_features": 17,
+  "seq_len": 5,
+  "pred_len": 1,
+  "date_range": "2025-01-08 13:08:25 to 2025-09-16 01:02:32",
+  "feature_names": [
+    "初撑力值",
+    "末阻力值",
+    "压力增量",
+    "压力增长率",
+    "循环时长_秒",
+    "压力变化速率",
+    "geo_total_thickness_m",
+    "geo_coal_thickness_m",
+    "geo_coal_seam_count",
+    "geo_depth_to_top_coal_m",
+    "geo_avg_elastic_modulus_GPa",
+    "geo_avg_density_kN_m3",
+    "geo_max_tensile_MPa",
+    "geo_prop_sandstone",
+    "geo_prop_mudstone",
+    "小时",
+    "星期几"
+  ]
+}
