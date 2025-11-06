@@ -355,6 +355,53 @@ def generate_dataloader(data, batch_size, seq_len=12, pre_len=1, train_ratio=0.7
 # 2. STGCN 模型定义 (PyTorch)
 # ----------------------------------------------------------------------
 
+class SimpleLSTM(nn.Module):
+    """
+    简单的 LSTM 模型（不使用图结构，直接序列预测）
+    适用于稀疏图数据
+    """
+    def __init__(self, num_features, hidden_dim=128, num_layers=2):
+        super(SimpleLSTM, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        
+        # LSTM 层
+        self.lstm = nn.LSTM(
+            num_features, 
+            hidden_dim, 
+            num_layers, 
+            batch_first=True,
+            dropout=0.2 if num_layers > 1 else 0
+        )
+        
+        # 全连接层
+        self.fc1 = nn.Linear(hidden_dim, 64)
+        self.fc2 = nn.Linear(64, 32)
+        self.fc3 = nn.Linear(32, 1)
+        
+        self.dropout = nn.Dropout(0.2)
+        self.relu = nn.ReLU()
+        
+    def forward(self, X):
+        """
+        X: (Batch, seq_len, num_features)
+        输出: (Batch, 1) - 预测值
+        """
+        # LSTM
+        lstm_out, _ = self.lstm(X)  # (B, T, hidden)
+        
+        # 取最后一个时间步
+        last_hidden = lstm_out[:, -1, :]  # (B, hidden)
+        
+        # 全连接层
+        x = self.relu(self.fc1(last_hidden))
+        x = self.dropout(x)
+        x = self.relu(self.fc2(x))
+        x = self.dropout(x)
+        out = self.fc3(x)  # (B, 1)
+        
+        return out
+
 class TimeBlock(nn.Module):
     """
     时序卷积块 (TCN)
@@ -869,6 +916,21 @@ if data_source == "使用预处理数据集" and npz_file:
         # 模型训练部分
         st.header("4. 模型训练")
         
+        # 模型选择
+        model_type = st.radio(
+            "选择模型类型",
+            ["LSTM (推荐)", "STGCN (图神经网络)"],
+            help="LSTM 适用于稀疏数据，STGCN 适用于密集图数据"
+        )
+        
+        st.info(f"""
+        **{'✅ LSTM 模型' if model_type.startswith('LSTM') else '⚠️ STGCN 模型'}**
+        
+        {'- 不使用图结构，直接序列预测' if model_type.startswith('LSTM') else '- 使用图结构进行空间-时间联合建模'}
+        {'- 适合稀疏数据（当前数据每样本只有1个节点）' if model_type.startswith('LSTM') else '- 适合密集图数据（所有节点都有值）'}
+        {'- 训练速度快，效果稳定' if model_type.startswith('LSTM') else '- 需要完整的图结构信息'}
+        """)
+        
         # 训练参数
         col1, col2 = st.columns(2)
         with col1:
@@ -964,70 +1026,101 @@ if data_source == "使用预处理数据集" and npz_file:
                     return batch_X, batch_y
                 
                 # 转换训练数据
-                st.write("### 步骤3: 转换数据格式")
+                st.write("### 步骤3: 数据归一化与格式转换")
                 
-                # ⭐ 数据归一化优化：逐特征标准化
+                # ⭐ 改进的归一化策略
                 st.write("正在进行数据归一化...")
-                scaler_params = []
-                X_train_normalized = X_train.copy()
-                X_val_normalized = X_val.copy()
-                y_train_normalized = y_train.copy()
-                y_val_normalized = y_val.copy()
                 
-                # 对每个特征单独归一化
-                for feat_idx in range(X_train.shape[2]):
-                    feat_data = X_train[:, :, feat_idx]
-                    mean = feat_data.mean()
-                    std = feat_data.std()
-                    if std < 1e-6:  # 避免除零
-                        std = 1.0
-                    
-                    scaler_params.append({'mean': mean, 'std': std})
-                    
-                    X_train_normalized[:, :, feat_idx] = (X_train[:, :, feat_idx] - mean) / std
-                    X_val_normalized[:, :, feat_idx] = (X_val[:, :, feat_idx] - mean) / std
-                
-                # 归一化目标值
+                # 对整个训练集计算统计量（包括特征和目标）
+                # 方案：只对目标值归一化，特征保持原始尺度
                 y_mean = y_train.mean()
                 y_std = y_train.std()
                 if y_std < 1e-6:
                     y_std = 1.0
                 
-                y_train_normalized = (y_train - y_mean) / y_std
-                y_val_normalized = (y_val - y_mean) / y_std
+                # MinMax 归一化目标值到 [0, 1]
+                y_min = y_train.min()
+                y_max = y_train.max()
+                y_range = y_max - y_min
+                if y_range < 1e-6:
+                    y_range = 1.0
                 
-                st.write(f"✓ 数据归一化完成 (y_mean={y_mean:.2f}, y_std={y_std:.2f})")
+                # 使用 MinMax 而不是 Z-Score
+                y_train_normalized = (y_train - y_min) / y_range
+                y_val_normalized = (y_val - y_min) / y_range
+                
+                # 特征归一化：逐特征 MinMax
+                X_train_normalized = X_train.copy()
+                X_val_normalized = X_val.copy()
+                
+                for feat_idx in range(X_train.shape[2]):
+                    feat_min = X_train[:, :, feat_idx].min()
+                    feat_max = X_train[:, :, feat_idx].max()
+                    feat_range = feat_max - feat_min
+                    if feat_range < 1e-6:
+                        feat_range = 1.0
+                    
+                    X_train_normalized[:, :, feat_idx] = (X_train[:, :, feat_idx] - feat_min) / feat_range
+                    X_val_normalized[:, :, feat_idx] = (X_val[:, :, feat_idx] - feat_min) / feat_range
+                
+                st.write(f"✓ MinMax归一化完成 (y范围: {y_min:.2f} - {y_max:.2f} MPa)")
+                
+                # 根据模型类型准备数据
+                if model_type.startswith("LSTM"):
+                    # LSTM: 直接使用序列数据，不需要图结构
+                    st.write("### 步骤4: 准备序列数据（LSTM模式）")
+                    
+                    # 数据已经是 (samples, seq_len, features) 格式，直接使用
+                    train_X_tensor = torch.FloatTensor(X_train_normalized)
+                    train_y_tensor = torch.FloatTensor(y_train_normalized).unsqueeze(1)  # (N, 1)
+                    val_X_tensor = torch.FloatTensor(X_val_normalized)
+                    val_y_tensor = torch.FloatTensor(y_val_normalized).unsqueeze(1)
+                    
+                    st.write(f"训练集: X {train_X_tensor.shape}, y {train_y_tensor.shape}")
+                    st.write(f"验证集: X {val_X_tensor.shape}, y {val_y_tensor.shape}")
+                    
+                else:
+                    # STGCN: 需要图结构
+                    st.write("### 步骤4: 转换为图数据格式（STGCN模式）")
                 
                 with st.spinner("转换训练数据格式..."):
-                    train_X_graph, train_y_graph = prepare_batch_data(
-                        X_train_normalized, y_train_normalized, train_support_ids, num_nodes
-                    )
-                    val_X_graph, val_y_graph = prepare_batch_data(
-                        X_val_normalized, y_val_normalized, val_support_ids, num_nodes
-                    )
-                
-                # 转为torch张量 (不要一次性全部加载到GPU)
-                train_X_tensor = torch.FloatTensor(train_X_graph)
-                train_y_tensor = torch.FloatTensor(train_y_graph)
-                val_X_tensor = torch.FloatTensor(val_X_graph)
-                val_y_tensor = torch.FloatTensor(val_y_graph)
-                A_hat_tensor = torch.FloatTensor(A_hat).to(device)
-                
-                st.write(f"训练集: X {train_X_tensor.shape}, y {train_y_tensor.shape}")
-                st.write(f"验证集: X {val_X_tensor.shape}, y {val_y_tensor.shape}")
+                    if model_type.startswith("STGCN"):
+                        train_X_graph, train_y_graph = prepare_batch_data(
+                            X_train_normalized, y_train_normalized, train_support_ids, num_nodes
+                        )
+                        val_X_graph, val_y_graph = prepare_batch_data(
+                            X_val_normalized, y_val_normalized, val_support_ids, num_nodes
+                        )
+                        
+                        # 转为torch张量
+                        train_X_tensor = torch.FloatTensor(train_X_graph)
+                        train_y_tensor = torch.FloatTensor(train_y_graph)
+                        val_X_tensor = torch.FloatTensor(val_X_graph)
+                        val_y_tensor = torch.FloatTensor(val_y_graph)
+                        A_hat_tensor = torch.FloatTensor(A_hat).to(device)
+                        
+                        st.write(f"训练集: X {train_X_tensor.shape}, y {train_y_tensor.shape}")
+                        st.write(f"验证集: X {val_X_tensor.shape}, y {val_y_tensor.shape}")
                 
                 # 初始化模型
                 seq_len = X_train.shape[1]
                 pred_len = 1
                 num_features = X_train.shape[2]
                 
-                model = STGCN(
-                    num_nodes=num_nodes,
-                    num_features=num_features,
-                    seq_len=seq_len,
-                    pred_len=pred_len,
-                    Kt=3
-                ).to(device)
+                if model_type.startswith("LSTM"):
+                    model = SimpleLSTM(
+                        num_features=num_features,
+                        hidden_dim=hidden_dim * 2,  # LSTM 用更大的隐藏层
+                        num_layers=2
+                    ).to(device)
+                else:
+                    model = STGCN(
+                        num_nodes=num_nodes,
+                        num_features=num_features,
+                        seq_len=seq_len,
+                        pred_len=pred_len,
+                        Kt=3
+                    ).to(device)
                 
                 st.write(f"模型参数量: {sum(p.numel() for p in model.parameters()):,}")
                 
@@ -1078,10 +1171,12 @@ if data_source == "使用预处理数据集" and npz_file:
                         optimizer.zero_grad()
                         
                         # 前向传播
-                        outputs = model(batch_X, A_hat_tensor)  # (B, 1, N, 1)
-                        
-                        # 计算损失
-                        loss = criterion(outputs, batch_y)
+                        if model_type.startswith("LSTM"):
+                            outputs = model(batch_X)  # (B, 1)
+                            loss = criterion(outputs, batch_y)
+                        else:
+                            outputs = model(batch_X, A_hat_tensor)  # (B, 1, N, 1)
+                            loss = criterion(outputs, batch_y)
                         
                         # 反向传播
                         loss.backward()
@@ -1096,10 +1191,8 @@ if data_source == "使用预处理数据集" and npz_file:
                     # 验证阶段 (使用批处理避免显存溢出)
                     model.eval()
                     val_loss_sum = 0
-                    mae_sum = 0
-                    rmse_sum = 0
-                    r2_numerator = 0
-                    r2_denominator = 0
+                    all_preds = []
+                    all_targets = []
                     val_batch_count = 0
                     
                     with torch.no_grad():
@@ -1107,20 +1200,18 @@ if data_source == "使用预处理数据集" and npz_file:
                             val_batch_X = val_batch_X.to(device)
                             val_batch_y = val_batch_y.to(device)
                             
-                            val_batch_outputs = model(val_batch_X, A_hat_tensor)
+                            if model_type.startswith("LSTM"):
+                                val_batch_outputs = model(val_batch_X)
+                            else:
+                                val_batch_outputs = model(val_batch_X, A_hat_tensor)
                             
-                            # 累积损失
+                            # 累积损失（归一化空间）
                             batch_loss = criterion(val_batch_outputs, val_batch_y).item()
                             val_loss_sum += batch_loss * len(val_batch_X)
                             
-                            # 累积指标
-                            mae_sum += torch.sum(torch.abs(val_batch_outputs - val_batch_y)).item()
-                            rmse_sum += torch.sum((val_batch_outputs - val_batch_y)**2).item()
-                            
-                            # R² 计算
-                            y_mean = torch.mean(val_batch_y)
-                            r2_numerator += torch.sum((val_batch_y - val_batch_outputs)**2).item()
-                            r2_denominator += torch.sum((val_batch_y - y_mean)**2).item()
+                            # 收集预测和真实值用于后续计算
+                            all_preds.append(val_batch_outputs.cpu())
+                            all_targets.append(val_batch_y.cpu())
                             
                             val_batch_count += len(val_batch_X)
                             
@@ -1128,16 +1219,26 @@ if data_source == "使用预处理数据集" and npz_file:
                             del val_batch_X, val_batch_y, val_batch_outputs
                             torch.cuda.empty_cache()
                         
-                        # 计算平均指标
+                        # 合并所有批次
+                        all_preds = torch.cat(all_preds, dim=0)
+                        all_targets = torch.cat(all_targets, dim=0)
+                        
+                        # 反归一化到原始尺度 (MinMax 反变换)
+                        all_preds_original = all_preds * y_range + y_min
+                        all_targets_original = all_targets * y_range + y_min
+                        
+                        # 计算原始尺度的指标
+                        mae = torch.mean(torch.abs(all_preds_original - all_targets_original)).item()
+                        rmse = torch.sqrt(torch.mean((all_preds_original - all_targets_original)**2)).item()
+                        
+                        # R² (在原始尺度计算)
+                        y_mean_original = torch.mean(all_targets_original)
+                        ss_tot = torch.sum((all_targets_original - y_mean_original)**2)
+                        ss_res = torch.sum((all_targets_original - all_preds_original)**2)
+                        r2 = (1 - ss_res / ss_tot).item() if ss_tot > 0 else 0
+                        
+                        # 计算平均损失
                         val_loss = val_loss_sum / val_batch_count
-                        mae_normalized = mae_sum / val_batch_count
-                        rmse_normalized = np.sqrt(rmse_sum / val_batch_count)
-                        r2 = 1 - r2_numerator / r2_denominator if r2_denominator > 0 else 0
-                        
-                        # 反归一化到原始尺度
-                        mae = mae_normalized * y_std
-                        rmse = rmse_normalized * y_std
-                        
                         val_losses.append(val_loss)
                     
                     # 保存最佳模型
@@ -1225,20 +1326,30 @@ if data_source == "使用预处理数据集" and npz_file:
                 with torch.no_grad():
                     example_X = val_X_tensor[indices].to(device)
                     example_y_true = val_y_tensor[indices].to(device)
-                    example_y_pred = model(example_X, A_hat_tensor)
+                    
+                    if model_type.startswith("LSTM"):
+                        example_y_pred = model(example_X).unsqueeze(1)  # (B, 1)
+                    else:
+                        example_y_pred = model(example_X, A_hat_tensor)
                 
                 # 创建对比表
                 comparison_data = []
                 for i, idx in enumerate(indices):
                     sup_id = val_support_ids[idx]
-                    node_idx = support_to_idx[sup_id]
                     
-                    # 反归一化到原始尺度
-                    true_val_normalized = example_y_true[i, 0, node_idx, 0].cpu().item()
-                    pred_val_normalized = example_y_pred[i, 0, node_idx, 0].cpu().item()
+                    if model_type.startswith("LSTM"):
+                        # LSTM: 直接输出标量
+                        true_val_normalized = example_y_true[i, 0].cpu().item()
+                        pred_val_normalized = example_y_pred[i, 0].cpu().item()
+                    else:
+                        # STGCN: 从图结构中提取
+                        node_idx = support_to_idx[sup_id]
+                        true_val_normalized = example_y_true[i, 0, node_idx, 0].cpu().item()
+                        pred_val_normalized = example_y_pred[i, 0, node_idx, 0].cpu().item()
                     
-                    true_val = true_val_normalized * y_std + y_mean
-                    pred_val = pred_val_normalized * y_std + y_mean
+                    # 反归一化到原始尺度 (MinMax 反变换)
+                    true_val = true_val_normalized * y_range + y_min
+                    pred_val = pred_val_normalized * y_range + y_min
                     error = abs(pred_val - true_val)
                     
                     comparison_data.append({
