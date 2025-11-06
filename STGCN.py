@@ -19,6 +19,9 @@ warnings.filterwarnings('ignore', category=UserWarning, message='.*NVIDIA.*')
 import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
 
+# 解决 OpenMP 冲突问题
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 # ----------------------------------------------------------------------
 # 1. 帮助函数 (Utils)
 # ----------------------------------------------------------------------
@@ -667,10 +670,12 @@ else:  # CSV 文件上传模式
     )
 
 # 步骤3: 上传地质特征(可选) - 只在CSV模式下显示
+use_geological = False  # 默认值
+geo_file = None
 if data_source == "上传CSV文件":
     st.sidebar.subheader("步骤3: 地质特征 (可选)")
     use_geological = st.sidebar.checkbox("融合地质特征数据", value=False)
-    geo_file = None
+    
 if use_geological:
     # 检查是否存在默认地质特征文件
     default_geo_path = os.path.join(os.path.dirname(__file__), 'geology_features_extracted.csv')
@@ -792,6 +797,13 @@ if data_source == "使用预处理数据集" and npz_file:
         
         # 数据分割
         st.header("2. 数据分割")
+        
+        st.info("""
+        💡 **数据量充足**：当前有 195,836 个样本，数据量充足适合深度学习。
+        
+        建议比例：训练 70% / 验证 15% / 测试 15%
+        """)
+        
         train_ratio = st.slider("训练集比例", 0.5, 0.9, 0.7, 0.05)
         val_ratio = st.slider("验证集比例", 0.05, 0.3, 0.15, 0.05)
         
@@ -866,6 +878,28 @@ if data_source == "使用预处理数据集" and npz_file:
             learning_rate = st.number_input("学习率", min_value=0.0001, value=0.001, max_value=0.1, format="%.4f", step=0.0001)
             hidden_dim = st.number_input("隐藏层维度", min_value=16, value=64, max_value=256, step=16)
         
+        # 优化建议
+        with st.expander("💡 训练优化建议"):
+            st.markdown("""
+            **如果效果不好，可以尝试：**
+            
+            1. **增加训练轮数** → 改为 100-200 轮
+            2. **调整学习率** → 尝试 0.0001-0.005 之间
+            3. **增大批次** → 改为 128 或 256（如果显存够）
+            4. **更换图结构** → 试试 KNN (K=3-10) 而不是 distance
+            5. **调整距离阈值** → 如果用 distance 方法，试试 3-15 米
+            
+            **当前优化：**
+            - ✅ 逐特征归一化（避免不同尺度特征的影响）
+            - ✅ 批处理验证（避免显存溢出）
+            - ✅ 动态学习率调整（可考虑添加学习率衰减）
+            
+            **理想指标：**
+            - MAE < 10 MPa
+            - RMSE < 15 MPa  
+            - R² > 0.5
+            """)
+        
         if st.button("🚀 开始训练", type="primary"):
             try:
                 st.success("开始训练STGCN模型...")
@@ -931,19 +965,52 @@ if data_source == "使用预处理数据集" and npz_file:
                 
                 # 转换训练数据
                 st.write("### 步骤3: 转换数据格式")
+                
+                # ⭐ 数据归一化优化：逐特征标准化
+                st.write("正在进行数据归一化...")
+                scaler_params = []
+                X_train_normalized = X_train.copy()
+                X_val_normalized = X_val.copy()
+                y_train_normalized = y_train.copy()
+                y_val_normalized = y_val.copy()
+                
+                # 对每个特征单独归一化
+                for feat_idx in range(X_train.shape[2]):
+                    feat_data = X_train[:, :, feat_idx]
+                    mean = feat_data.mean()
+                    std = feat_data.std()
+                    if std < 1e-6:  # 避免除零
+                        std = 1.0
+                    
+                    scaler_params.append({'mean': mean, 'std': std})
+                    
+                    X_train_normalized[:, :, feat_idx] = (X_train[:, :, feat_idx] - mean) / std
+                    X_val_normalized[:, :, feat_idx] = (X_val[:, :, feat_idx] - mean) / std
+                
+                # 归一化目标值
+                y_mean = y_train.mean()
+                y_std = y_train.std()
+                if y_std < 1e-6:
+                    y_std = 1.0
+                
+                y_train_normalized = (y_train - y_mean) / y_std
+                y_val_normalized = (y_val - y_mean) / y_std
+                
+                st.write(f"✓ 数据归一化完成 (y_mean={y_mean:.2f}, y_std={y_std:.2f})")
+                
                 with st.spinner("转换训练数据格式..."):
                     train_X_graph, train_y_graph = prepare_batch_data(
-                        X_train, y_train, train_support_ids, num_nodes
+                        X_train_normalized, y_train_normalized, train_support_ids, num_nodes
                     )
                     val_X_graph, val_y_graph = prepare_batch_data(
-                        X_val, y_val, val_support_ids, num_nodes
+                        X_val_normalized, y_val_normalized, val_support_ids, num_nodes
                     )
                 
-                # 转为torch张量
-                train_X_tensor = torch.FloatTensor(train_X_graph).to(device)
-                train_y_tensor = torch.FloatTensor(train_y_graph).to(device)
-                val_X_tensor = torch.FloatTensor(val_X_graph).to(device)
-                val_y_tensor = torch.FloatTensor(val_y_graph).to(device)
+                # 转为torch张量 (不要一次性全部加载到GPU)
+                train_X_tensor = torch.FloatTensor(train_X_graph)
+                train_y_tensor = torch.FloatTensor(train_y_graph)
+                val_X_tensor = torch.FloatTensor(val_X_graph)
+                val_y_tensor = torch.FloatTensor(val_y_graph)
                 A_hat_tensor = torch.FloatTensor(A_hat).to(device)
                 
                 st.write(f"训练集: X {train_X_tensor.shape}, y {train_y_tensor.shape}")
@@ -968,6 +1035,15 @@ if data_source == "使用预处理数据集" and npz_file:
                 criterion = nn.MSELoss()
                 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
                 
+                # 学习率调度器 (验证损失不下降时降低学习率)
+                scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer, mode='min', factor=0.5, patience=10
+                )
+                
+                # 早停参数
+                early_stop_patience = 20
+                early_stop_counter = 0
+                
                 # 训练循环
                 progress_bar = st.progress(0)
                 status_text = st.empty()
@@ -978,10 +1054,13 @@ if data_source == "使用预处理数据集" and npz_file:
                 val_losses = []
                 best_val_loss = float('inf')
                 
-                # 创建DataLoader
+                # 创建DataLoader (训练和验证都使用批处理)
                 from torch.utils.data import TensorDataset, DataLoader
                 train_dataset = TensorDataset(train_X_tensor, train_y_tensor)
                 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+                
+                val_dataset = TensorDataset(val_X_tensor, val_y_tensor)
+                val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
                 
                 start_time = time.time()
                 
@@ -992,6 +1071,10 @@ if data_source == "使用预处理数据集" and npz_file:
                     batch_count = 0
                     
                     for batch_X, batch_y in train_loader:
+                        # 将数据移到GPU
+                        batch_X = batch_X.to(device)
+                        batch_y = batch_y.to(device)
+                        
                         optimizer.zero_grad()
                         
                         # 前向传播
@@ -1010,28 +1093,69 @@ if data_source == "使用预处理数据集" and npz_file:
                     avg_train_loss = epoch_train_loss / batch_count
                     train_losses.append(avg_train_loss)
                     
-                    # 验证阶段
+                    # 验证阶段 (使用批处理避免显存溢出)
                     model.eval()
+                    val_loss_sum = 0
+                    mae_sum = 0
+                    rmse_sum = 0
+                    r2_numerator = 0
+                    r2_denominator = 0
+                    val_batch_count = 0
+                    
                     with torch.no_grad():
-                        val_outputs = model(val_X_tensor, A_hat_tensor)
-                        val_loss = criterion(val_outputs, val_y_tensor).item()
+                        for val_batch_X, val_batch_y in val_loader:
+                            val_batch_X = val_batch_X.to(device)
+                            val_batch_y = val_batch_y.to(device)
+                            
+                            val_batch_outputs = model(val_batch_X, A_hat_tensor)
+                            
+                            # 累积损失
+                            batch_loss = criterion(val_batch_outputs, val_batch_y).item()
+                            val_loss_sum += batch_loss * len(val_batch_X)
+                            
+                            # 累积指标
+                            mae_sum += torch.sum(torch.abs(val_batch_outputs - val_batch_y)).item()
+                            rmse_sum += torch.sum((val_batch_outputs - val_batch_y)**2).item()
+                            
+                            # R² 计算
+                            y_mean = torch.mean(val_batch_y)
+                            r2_numerator += torch.sum((val_batch_y - val_batch_outputs)**2).item()
+                            r2_denominator += torch.sum((val_batch_y - y_mean)**2).item()
+                            
+                            val_batch_count += len(val_batch_X)
+                            
+                            # 清理显存
+                            del val_batch_X, val_batch_y, val_batch_outputs
+                            torch.cuda.empty_cache()
+                        
+                        # 计算平均指标
+                        val_loss = val_loss_sum / val_batch_count
+                        mae_normalized = mae_sum / val_batch_count
+                        rmse_normalized = np.sqrt(rmse_sum / val_batch_count)
+                        r2 = 1 - r2_numerator / r2_denominator if r2_denominator > 0 else 0
+                        
+                        # 反归一化到原始尺度
+                        mae = mae_normalized * y_std
+                        rmse = rmse_normalized * y_std
+                        
                         val_losses.append(val_loss)
-                        
-                        # 计算MAE和RMSE
-                        mae = torch.mean(torch.abs(val_outputs - val_y_tensor)).item()
-                        rmse = torch.sqrt(torch.mean((val_outputs - val_y_tensor)**2)).item()
-                        
-                        # 计算R²
-                        y_mean = torch.mean(val_y_tensor)
-                        ss_tot = torch.sum((val_y_tensor - y_mean)**2)
-                        ss_res = torch.sum((val_y_tensor - val_outputs)**2)
-                        r2 = 1 - ss_res / ss_tot
-                        r2 = r2.item()
                     
                     # 保存最佳模型
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
                         torch.save(model.state_dict(), 'best_stgcn_model.pth')
+                        early_stop_counter = 0
+                    else:
+                        early_stop_counter += 1
+                    
+                    # 学习率调度
+                    scheduler.step(val_loss)
+                    current_lr = optimizer.param_groups[0]['lr']
+                    
+                    # 早停检查
+                    if early_stop_counter >= early_stop_patience:
+                        st.warning(f"⚠️ 验证损失连续 {early_stop_patience} 轮未改善，提前停止训练")
+                        break
                     
                     # 更新进度
                     progress = (epoch + 1) / epochs
@@ -1044,6 +1168,7 @@ if data_source == "使用预处理数据集" and npz_file:
                         f"Epoch {epoch+1}/{epochs} | "
                         f"训练损失: {avg_train_loss:.4f} | "
                         f"验证损失: {val_loss:.4f} | "
+                        f"学习率: {current_lr:.6f} | "
                         f"已用时: {elapsed:.1f}s | ETA: {eta:.1f}s"
                     )
                     
@@ -1088,7 +1213,7 @@ if data_source == "使用预处理数据集" and npz_file:
                 
                 st.info("最佳模型已保存到: best_stgcn_model.pth")
                 
-                # 预测示例
+                # 预测示例 (使用小批次避免显存溢出)
                 st.subheader("🔮 预测示例")
                 model.load_state_dict(torch.load('best_stgcn_model.pth'))
                 model.eval()
@@ -1098,8 +1223,8 @@ if data_source == "使用预处理数据集" and npz_file:
                 indices = np.random.choice(len(val_X_tensor), num_examples, replace=False)
                 
                 with torch.no_grad():
-                    example_X = val_X_tensor[indices]
-                    example_y_true = val_y_tensor[indices]
+                    example_X = val_X_tensor[indices].to(device)
+                    example_y_true = val_y_tensor[indices].to(device)
                     example_y_pred = model(example_X, A_hat_tensor)
                 
                 # 创建对比表
@@ -1108,8 +1233,12 @@ if data_source == "使用预处理数据集" and npz_file:
                     sup_id = val_support_ids[idx]
                     node_idx = support_to_idx[sup_id]
                     
-                    true_val = example_y_true[i, 0, node_idx, 0].cpu().item()
-                    pred_val = example_y_pred[i, 0, node_idx, 0].cpu().item()
+                    # 反归一化到原始尺度
+                    true_val_normalized = example_y_true[i, 0, node_idx, 0].cpu().item()
+                    pred_val_normalized = example_y_pred[i, 0, node_idx, 0].cpu().item()
+                    
+                    true_val = true_val_normalized * y_std + y_mean
+                    pred_val = pred_val_normalized * y_std + y_mean
                     error = abs(pred_val - true_val)
                     
                     comparison_data.append({
@@ -1117,10 +1246,14 @@ if data_source == "使用预处理数据集" and npz_file:
                         '真实值 (MPa)': f"{true_val:.2f}",
                         '预测值 (MPa)': f"{pred_val:.2f}",
                         '误差 (MPa)': f"{error:.2f}",
-                        '误差率': f"{error/true_val*100:.1f}%"
+                        '误差率': f"{error/abs(true_val)*100:.1f}%" if abs(true_val) > 1e-6 else "N/A"
                     })
                 
                 st.table(pd.DataFrame(comparison_data))
+                
+                # 清理显存
+                del example_X, example_y_true, example_y_pred
+                torch.cuda.empty_cache()
                 
             except Exception as e:
                 st.error(f"训练过程出错: {e}")

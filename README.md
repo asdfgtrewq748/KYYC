@@ -40,8 +40,9 @@ conda activate kyyc_py311
 # 安装 PyTorch (GPU版 - CUDA 13.0)
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 
-# 安装其他依赖
-pip install streamlit pandas scipy numpy matplotlib
+# 安装其他依赖（注意NumPy版本）
+pip install "numpy<2.0"
+pip install streamlit pandas scipy matplotlib
 ```
 
 #### 方法 B: 一键安装（Windows）

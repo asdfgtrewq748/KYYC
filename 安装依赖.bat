@@ -31,7 +31,8 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 
 echo.
 echo 安装其他依赖...
-pip install streamlit pandas scipy numpy matplotlib
+pip install "numpy<2.0"
+pip install streamlit pandas scipy matplotlib
 
 echo.
 echo ========================================
