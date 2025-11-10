@@ -1,20 +1,24 @@
-﻿# KYYC 矿压预测系统 - 安全训练版本
-
-##  项目简介
+﻿# KYYC 矿压预测系统
 
 基于Transformer的煤矿液压支架末阻力预测系统。
 
-**核心特点：**
--  17个标准化特征（矿压 + 地质）
+##  核心特点
+
+-  17个特征（6矿压 + 9地质 + 2时间）
+-  地质条件融合（52.9%特征占比）
 -  防弹数值保护（零NaN风险）
--  自动化训练流程
 -  GPU加速（CUDA 13.0）
 
----
+##  训练成果
+
+- **验证R**: 0.5728
+- **验证MAE**: 4.91 MPa
+- **训练时长**: 48分钟
+- **训练批次**: 149,940个（0个NaN）
 
 ##  快速开始
 
-**一键启动：**
+**一键训练：**
 ```
 双击: 开始训练.bat
 ```
@@ -25,73 +29,102 @@ conda activate kyyc_py311
 python train_safe.py
 ```
 
----
-
 ##  项目结构
 
 ```
 KYYC/
+ 核心系统
+    simple_dataloader.py      数据加载器
+    stable_transformer.py     Transformer模型
+    train_safe.py            训练脚本
+    safe_best_model.pth      最佳模型
+
  数据处理
     preprocess/              预处理脚本
-    processed_data/          处理后数据（17特征）
-    测试钻孔/                钻孔地质数据
-    kaungya/                 原始压力数据
-
- 训练系统
-    simple_dataloader.py     数据加载器
-    stable_transformer.py    Transformer模型
-    train_safe.py           训练脚本
-    开始训练.bat             启动脚本
+    processed_data/          训练数据（17特征）
+    测试钻孔/                地质数据
+    kaungya/                压力数据
 
  文档
     README.md               本文件
-    安全训练系统说明.md      详细说明
-    requirements.txt        Python依赖
+    docs/                   详细文档
 
- 旧系统存档/                  旧版STGCN系统
+ 工具
+     debug_data.py           数据调试
+     regenerate_data.py      重生成数据
+     检查训练就绪.py          环境检查
+     开始训练.bat            启动脚本
+     项目总览.bat            项目导航
 ```
-
----
-
-##  数据说明
-
-**输入：** 17个特征（8矿压 + 9地质） 5时间步  
-**输出：** 末阻力预测值（0-60 MPa）  
-**数据集：** 195,836样本（训练70% | 验证15% | 测试15%）
-
----
 
 ##  模型架构
 
-- **模型：** Transformer（3层，8注意力头）
-- **参数量：** 622,209
-- **训练配置：** lr=0.0001, batch=32, 梯度裁剪=1.0
+**Transformer配置：**
+- 参数量: 605,825
+- 隐藏层: 128维
+- Transformer层: 3层
+- 注意力头: 8个
+- 学习率: 0.0001
+- 梯度裁剪: 1.0
 
----
+##  地质特征（9个）
 
-##  预期结果
+模型包含了丰富的地质特征：
+1. 煤层厚度
+2. 总厚度
+3. 顶煤深度
+4. 平均弹性模量
+5. 平均密度
+6. 砂岩占比
+7. 泥岩占比
+8. 煤层数量
+9. 最大抗拉强度
 
+这些特征占总特征的**52.9%**，模型能够学习不同地质条件下的压力规律。
+
+##  使用模型
+
+```python
+import torch
+from stable_transformer import StableTransformer
+
+# 加载模型
+checkpoint = torch.load('safe_best_model.pth', weights_only=False)
+model = StableTransformer(
+    input_dim=17, seq_len=5, 
+    hidden_dim=128, num_layers=3, num_heads=8
+)
+model.load_state_dict(checkpoint['model_state_dict'])
+model.eval()
 ```
-训练时长: 45-60分钟（GPU）
-验证R: 0.75-0.80
-测试R: 0.70-0.78
-MAE: 5-7 MPa
+
+##  详细文档
+
+- [安全训练系统说明](docs/安全训练系统说明.md)
+- [地质特征影响分析](docs/地质特征影响分析.md)
+
+##  数据重生成
+
+```powershell
+python preprocess/prepare_training_data.py
 ```
 
----
+##  环境要求
+
+- Python 3.11+
+- PyTorch 2.9.0 (CUDA 13.0)
+- Conda环境: kyyc_py311
 
 ##  版本历史
 
-**v2.0 - 安全训练系统（当前）**
+**v2.0** - 安全训练系统（当前）
 - 完全重写，零NaN风险
-- 固定17特征
+- 固定17特征，地质融合
 - 352行简洁代码
 
-**v1.0 - STGCN系统（已归档）**
-- Streamlit界面
-- 4063行代码
-- 见 `旧系统存档/`
+**v1.0** - STGCN系统（已归档）
+- 见 旧系统存档/
 
 ---
 
-详细文档请查看：`安全训练系统说明.md`
+**项目仓库**: [GitHub - KYYC](https://github.com/asdfgtrewq748/KYYC)

@@ -306,8 +306,8 @@ def train_model(config):
     print("🧪 最终测试")
     print("="*70)
     
-    # 加载最佳模型
-    checkpoint = torch.load(config['save_path'])
+    # 加载最佳模型（PyTorch 2.9兼容）
+    checkpoint = torch.load(config['save_path'], weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     
     # 测试
