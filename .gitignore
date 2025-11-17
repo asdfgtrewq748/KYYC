@@ -48,6 +48,14 @@ env/
 pytorch_wheels/
 *.whl
 
+# Model checkpoints (too large for GitHub)
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.pkl
+*.npz
+
 # OS
 .DS_Store
 Thumbs.db
