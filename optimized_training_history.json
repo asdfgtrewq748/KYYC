@@ -1,0 +1,16 @@
+{
+  "best_epoch": 196,
+  "best_val_loss": 63.59694836057466,
+  "best_r2": 0.5685957670211792,
+  "best_mae": 91.03428649902344,
+  "model_config": {
+    "seq_len": 5,
+    "num_pressure_features": 6,
+    "num_geology_features": 9,
+    "num_time_features": 2,
+    "hidden_dim": 128,
+    "num_lstm_layers": 2,
+    "dropout": 0.3
+  },
+  "note": "完整训练历史因序列化错误丢失，此为最佳结果记录"
+}
